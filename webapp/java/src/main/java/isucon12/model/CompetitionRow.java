@@ -2,6 +2,7 @@ package isucon12.model;
 
 import java.util.Date;
 
+// 大会
 public class CompetitionRow {
     private Long tenantId;
     private String id;

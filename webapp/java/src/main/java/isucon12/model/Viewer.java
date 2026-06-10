@@ -1,5 +1,6 @@
 package isucon12.model;
 
+// リクエストしてきたユーザーの情報
 public class Viewer {
     private String role;
     private String playerId;

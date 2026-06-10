@@ -2,6 +2,7 @@ package isucon12.model;
 
 import java.util.Date;
 
+// プレイヤーのスコア
 public class PlayerScoreRow {
     private Long tenantId;
     private String id;

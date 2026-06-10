@@ -2,6 +2,7 @@ package isucon12.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+// テナント請求額
 public class TenantWithBilling {
     private String id;
     private String name;

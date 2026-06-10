@@ -2,6 +2,7 @@ package isucon12.model;
 
 import java.util.Date;
 
+// 閲覧履歴の集計
 public class VisitHistorySummaryRow {
     private String playerId;
     private Date minCreatedAt;

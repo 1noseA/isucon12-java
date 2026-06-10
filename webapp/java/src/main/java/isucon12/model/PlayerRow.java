@@ -2,11 +2,12 @@ package isucon12.model;
 
 import java.util.Date;
 
+// プレイヤー
 public class PlayerRow {
     private Long tenantId;
     private String id;
     private String displayName;
-    private Boolean isDisqualified;
+    private Boolean isDisqualified; // 失格フラグ
     private Date createdAt;
     private Date updatedAt;
 

@@ -2,6 +2,7 @@ package isucon12.model;
 
 import java.util.Date;
 
+// プレイヤーが大会ランキングを閲覧した履歴
 public class VisitHistoryRow {
     private String playerId;
     private Long tenantId;

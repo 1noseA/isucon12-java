@@ -2,6 +2,7 @@ package isucon12.model;
 
 import java.util.Date;
 
+// テナント
 public class TenantRow {
     private Long id;
     private String name;
