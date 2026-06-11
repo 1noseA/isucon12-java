@@ -24,10 +24,10 @@ services:
     depends_on:
       - mysql
     volumes:
-      - tenant_db:/home/isucon/webapp/tenant_db
+      - ./webapp/tenant_db:/home/isucon/webapp/tenant_db
       - ./webapp/sql:/home/isucon/webapp/sql
       - ./webapp/java/public.pem:/home/isucon/webapp/public.pem:ro
-      - initial_data:/home/isucon/initial_data
+      - ./initial_data:/home/isucon/initial_data
     init: true
 
   mysql:
@@ -43,5 +43,3 @@ services:
 
 volumes:
   mysql:
-  tenant_db:
-  initial_data:
