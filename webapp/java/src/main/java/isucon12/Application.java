@@ -33,6 +33,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import javax.annotation.PostConstruct;
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 
@@ -58,6 +59,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTVerifier;
@@ -136,6 +139,15 @@ public class Application {
     private String ISUCON_BASE_HOSTNAME;
     @Value("${ISUCON_ADMIN_HOSTNAME:admin.t.isucon.dev}")
     private String ISUCON_ADMIN_HOSTNAME;
+
+    private JWTVerifier cachedJwtVerifier;
+    private final Map<String, TenantRow> tenantCache = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    private void init() {
+        RSAPublicKey publicKey = this.readPublicKeyFromFile(ISUCON_JWT_KEY_FILE);
+        this.cachedJwtVerifier = JWT.require(Algorithm.RSA256(publicKey, null)).build();
+    }
 
     public String tenantDBPath(long id) {
         return Paths.get(ISUCON_TENANT_DB_DIR).resolve(String.format("%d.db", id)).toString();
@@ -285,10 +297,8 @@ public class Application {
     }
 
     private DecodedJWT verifyJwt(String token, String publicKeyFilePath) {
-        JWTVerifier jwtVerifier = JWT.require(Algorithm.RSA256(this.readPublicKeyFromFile(publicKeyFilePath), null)).build();
-
         try {
-            return jwtVerifier.verify(token);
+            return this.cachedJwtVerifier.verify(token);
         } catch (JWTVerificationException e) {
             throw new WebException(HttpStatus.UNAUTHORIZED, e);
         } catch (Exception e) {
@@ -306,6 +316,12 @@ public class Application {
             return new TenantRow("admin", "admin");
         }
 
+        // キャッシュから返す
+        TenantRow cached = tenantCache.get(tenantName);
+        if (cached != null) {
+            return cached;
+        }
+
         // テナントの存在確認
         SqlParameterSource source = new MapSqlParameterSource().addValue("name", tenantName);
         RowMapper<TenantRow> mapper = (rs, i) -> {
@@ -319,7 +335,9 @@ public class Application {
         };
 
         try {
-            return adminDb.queryForObject("SELECT * FROM tenant WHERE name = :name", source, mapper);
+            TenantRow row = adminDb.queryForObject("SELECT * FROM tenant WHERE name = :name", source, mapper);
+            tenantCache.put(tenantName, row);
+            return row;
         } catch (EmptyResultDataAccessException e) {
             return null;
         } catch (DataAccessException e) {
@@ -437,6 +455,14 @@ public class Application {
         //       /api/admin/tenants/billingにアクセスされるとエラーになりそう
         //       ロックなどで対処したほうが良さそう
         this.createTenantDB(tenantId);
+
+        TenantRow newTenant = new TenantRow();
+        newTenant.setId(tenantId);
+        newTenant.setName(name);
+        newTenant.setDisplayName(displayName);
+        newTenant.setCreatedAt(now);
+        newTenant.setUpdatedAt(now);
+        tenantCache.put(name, newTenant);
 
         TenantWithBilling twb = new TenantWithBilling();
         twb.setId(String.valueOf(tenantId));
