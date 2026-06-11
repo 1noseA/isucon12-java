@@ -541,6 +541,37 @@ public class Application {
         }
     }
 
+    private BillingReport computeBillingReport(CompetitionRow comp, Map<String, Date> playerVisits, Set<String> scoredPlayerIds) {
+        Map<String, String> billingMap = new HashMap<>();
+        for (Map.Entry<String, Date> entry : playerVisits.entrySet()) {
+            if (this.isValidFinishedAt(comp.getFinishedAt()) && comp.getFinishedAt().before(entry.getValue())) {
+                continue;
+            }
+            billingMap.put(entry.getKey(), "visitor");
+        }
+        for (String pid : scoredPlayerIds) {
+            billingMap.put(pid, "player");
+        }
+        long playerCount = 0, visitorCount = 0;
+        if (this.isValidFinishedAt(comp.getFinishedAt())) {
+            for (Map.Entry<String, String> entry : billingMap.entrySet()) {
+                switch (entry.getValue()) {
+                case "player": playerCount++; break;
+                case "visitor": visitorCount++; break;
+                }
+            }
+        }
+        BillingReport br = new BillingReport();
+        br.setCompetitionId(comp.getId());
+        br.setCompetitionTitle(comp.getTitle());
+        br.setPlayerCount(playerCount);
+        br.setVisitorCount(visitorCount);
+        br.setBillingPlayerYen(100 * playerCount);
+        br.setBillingVisitorYen(10 * visitorCount);
+        br.setBillingYen(100 * playerCount + 10 * visitorCount);
+        return br;
+    }
+
     // SaaS管理者用API テナントごとの課金レポートを最大10件、テナントのid降順で取得する
     // GET /api/admin/tenants/billing
     // URL引数beforeを指定した場合、指定した値よりもidが小さいテナントの課金レポートを取得する
@@ -606,19 +637,44 @@ public class Application {
                             new Date(rs.getLong("updated_at"))));
                 }
 
-                for (CompetitionRow comp : cs) {
-                    BillingReport report = this.billingReportByCompetition(tenantDb, t.getId(), comp.getId());
-                    Long billingYen = tb.getBillingYen() == null ? 0L : tb.getBillingYen();
-                    billingYen += report.getBillingYen();
-                    tb.setBillingYen(billingYen);
+                // competitionId → playerId → minCreatedAt
+                SqlParameterSource visitSource = new MapSqlParameterSource().addValue("tenant_id", t.getId());
+                String visitSql = "SELECT player_id, competition_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = :tenant_id GROUP BY player_id, competition_id";
+                Map<String, Map<String, Date>> vhsByComp = this.adminDb.query(visitSql, visitSource, rs2 -> {
+                    Map<String, Map<String, Date>> result = new HashMap<>();
+                    while (rs2.next()) {
+                        String compId = rs2.getString("competition_id");
+                        String playerId = rs2.getString("player_id");
+                        result.computeIfAbsent(compId, k -> new HashMap<>()).put(playerId, new Date(rs2.getLong("min_created_at")));
+                    }
+                    return result;
+                });
+
+                Map<String, Set<String>> scoredByComp = new HashMap<>();
+                synchronized (this) {
+                    try (PreparedStatement ps2 = tenantDb.prepareStatement("SELECT DISTINCT competition_id, player_id FROM player_score WHERE tenant_id = ?")) {
+                        ps2.setQueryTimeout(SQLITE_BUSY_TIMEOUT);
+                        ps2.setLong(1, t.getId());
+                        ResultSet rs2 = ps2.executeQuery();
+                        while (rs2.next()) {
+                            String compId = rs2.getString("competition_id");
+                            scoredByComp.computeIfAbsent(compId, k -> new HashSet<>()).add(rs2.getString("player_id"));
+                        }
+                    }
                 }
+
+                long totalBillingYen = 0;
+                for (CompetitionRow comp : cs) {
+                    Map<String, Date> playerVisits = vhsByComp.getOrDefault(comp.getId(), Collections.emptyMap());
+                    Set<String> scoredPlayerIds = scoredByComp.getOrDefault(comp.getId(), Collections.emptySet());
+                    totalBillingYen += this.computeBillingReport(comp, playerVisits, scoredPlayerIds).getBillingYen();
+                }
+                tb.setBillingYen(totalBillingYen);
                 tenantBillings.add(tb);
             } catch (DatabaseException e) {
                 throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "failed to connectToTenantDb: ", e);
             } catch (SQLException e) {
                 throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "failed to Select competition: ", e);
-            } catch (BillingReportByCompetitionException e) {
-                throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "failed to billingReportByCompetition: ", e);
             }
 
             if (tenantBillings.size() >= 10) {
@@ -953,10 +1009,37 @@ public class Application {
                         new Date(rs.getLong("updated_at"))));
             }
 
+            // competitionId → playerId → minCreatedAt
+            SqlParameterSource visitSource = new MapSqlParameterSource().addValue("tenant_id", v.getTenantId());
+            String visitSql = "SELECT player_id, competition_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = :tenant_id GROUP BY player_id, competition_id";
+            Map<String, Map<String, Date>> vhsByComp = this.adminDb.query(visitSql, visitSource, rs2 -> {
+                Map<String, Map<String, Date>> result = new HashMap<>();
+                while (rs2.next()) {
+                    String compId = rs2.getString("competition_id");
+                    String playerId = rs2.getString("player_id");
+                    result.computeIfAbsent(compId, k -> new HashMap<>()).put(playerId, new Date(rs2.getLong("min_created_at")));
+                }
+                return result;
+            });
+
+            Map<String, Set<String>> scoredByComp = new HashMap<>();
+            synchronized (this) {
+                try (PreparedStatement ps2 = tenantDb.prepareStatement("SELECT DISTINCT competition_id, player_id FROM player_score WHERE tenant_id = ?")) {
+                    ps2.setQueryTimeout(SQLITE_BUSY_TIMEOUT);
+                    ps2.setLong(1, v.getTenantId());
+                    ResultSet rs2 = ps2.executeQuery();
+                    while (rs2.next()) {
+                        String compId = rs2.getString("competition_id");
+                        scoredByComp.computeIfAbsent(compId, k -> new HashSet<>()).add(rs2.getString("player_id"));
+                    }
+                }
+            }
+
             List<BillingReport> tbrs = new ArrayList<>();
             for (CompetitionRow comp : cs) {
-                BillingReport report = this.billingReportByCompetition(tenantDb, v.getTenantId(), comp.getId());
-                tbrs.add(report);
+                Map<String, Date> playerVisits = vhsByComp.getOrDefault(comp.getId(), Collections.emptyMap());
+                Set<String> scoredPlayerIds = scoredByComp.getOrDefault(comp.getId(), Collections.emptySet());
+                tbrs.add(this.computeBillingReport(comp, playerVisits, scoredPlayerIds));
             }
 
             return new SuccessResult(true, new BillingHandlerResult(tbrs));
@@ -964,10 +1047,6 @@ public class Application {
             throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "error connectToTenantDb: ", e);
         } catch (SQLException e) {
             throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "error Select competition: ", e);
-        } catch (BillingReportByCompetitionException e) {
-            throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "error billingReportByCompetition: ", e);
-        } catch (NumberFormatException e) {
-            throw new WebException(HttpStatus.BAD_REQUEST, "error Long.valueOf(scoreStr): ", e);
         }
     }
 
@@ -1011,34 +1090,35 @@ public class Application {
                     }
                 }
 
-                List<PlayerScoreRow> pss = new ArrayList<>();
-                for (CompetitionRow c : cs) {
-                    // 最後にCSVに登場したスコアを採用する = row_numが一番大きいもの
-                    PreparedStatement ps = tenantDb.prepareStatement("SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? AND player_id = ? ORDER BY row_num DESC LIMIT 1");
+                // N+1修正: 全大会のスコアを1クエリで取得し、大会ごとに最大row_numを選択
+                Map<String, PlayerScoreRow> latestScoreByComp = new HashMap<>();
+                {
+                    PreparedStatement ps = tenantDb.prepareStatement("SELECT * FROM player_score WHERE tenant_id = ? AND player_id = ? ORDER BY row_num DESC");
                     ps.setQueryTimeout(SQLITE_BUSY_TIMEOUT);
                     ps.setLong(1, v.getTenantId());
-                    ps.setString(2, c.getId());
-                    ps.setString(3, p.getId());
+                    ps.setString(2, p.getId());
                     ResultSet rs = ps.executeQuery();
-                    if (!rs.isBeforeFirst()) {
-                        // 行がない = スコアが記録されてない
-                        continue;
+                    while (rs.next()) {
+                        String compId = rs.getString("competition_id");
+                        // row_num DESC順のため最初の出現が最大row_num
+                        latestScoreByComp.putIfAbsent(compId, new PlayerScoreRow(
+                                rs.getLong("tenant_id"),
+                                rs.getString("id"),
+                                rs.getString("player_id"),
+                                compId,
+                                rs.getLong("score"),
+                                rs.getLong("row_num"),
+                                new Date(rs.getLong("created_at")),
+                                new Date(rs.getLong("updated_at"))));
                     }
-                    pss.add(new PlayerScoreRow(
-                            rs.getLong("tenant_id"),
-                            rs.getString("id"),
-                            rs.getString("player_id"),
-                            rs.getString("competition_id"),
-                            rs.getLong("score"),
-                            rs.getLong("row_num"),
-                            new Date(rs.getLong("created_at")),
-                            new Date(rs.getLong("updated_at"))));
                 }
 
+                // N+1修正: 取得済みのcsを使いretrieveCompetitionを呼ばない
                 List<PlayerScoreDetail> psds = new ArrayList<>();
-                for (PlayerScoreRow psr : pss) {
-                    CompetitionRow comp = this.retrieveCompetition(tenantDb, psr.getCompetitionId());
-                    psds.add(new PlayerScoreDetail(comp.getTitle(), psr.getScore()));
+                for (CompetitionRow c : cs) {
+                    PlayerScoreRow psr = latestScoreByComp.get(c.getId());
+                    if (psr == null) continue;
+                    psds.add(new PlayerScoreDetail(c.getTitle(), psr.getScore()));
                 }
 
                 return new SuccessResult(true, new PlayerHandlerResult(new PlayerDetail(p.getId(), p.getDisplayName(), p.getIsDisqualified()), psds));
@@ -1052,8 +1132,6 @@ public class Application {
                 throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "error retrievePlayer: ", e);
             } catch (AuthorizePlayerException e) {
                 throw new WebException(e.getHttpStatus(), e);
-            } catch (RetrieveCompetitionException e) {
-                throw new WebException(HttpStatus.INTERNAL_SERVER_ERROR, "error retrieveCompetition: ", e);
             }
         }
     }
